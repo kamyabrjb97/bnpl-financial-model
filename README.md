@@ -33,17 +33,29 @@ statements every period.
 ## Quick start
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt          # Python engine + FastAPI
 
-# 1) Interactive dashboard
-streamlit run app/streamlit_app.py
+# ---- React app (primary UI) ----
+cd web && npm install && npm run build && cd ..
+python -m uvicorn server.main:app --port 8000
+# open http://localhost:8000
 
-# 2) Programmatic use
-python -c "from bnpl_model import run_model, EngineConfig; r = run_model(EngineConfig()); print(r.portfolio.tail())"
-
-# 3) Tests (50-case invariant grid)
+# ---- Tests (55-case invariant grid) ----
 python -m pytest -q
+
+# ---- Programmatic use ----
+python -c "from bnpl_model import run_model, EngineConfig; r = run_model(EngineConfig()); print(r.portfolio.tail())"
 ```
+
+**Frontend dev mode** (hot reload): run the API on one terminal and Vite on another —
+```bash
+python -m uvicorn server.main:app --reload --port 8000   # terminal 1 (API)
+cd web && npm run dev                                     # terminal 2 (Vite :5173, proxies /api)
+```
+
+The **React app** (`web/`) is the primary UI, served by a thin FastAPI layer (`server/`) that wraps the
+**unchanged** Python engine. An optional legacy Streamlit dashboard remains at `app/streamlit_app.py`
+(`streamlit run app/streamlit_app.py`).
 
 ### Use the engine in code
 
@@ -81,20 +93,26 @@ downside = run_model(cfg.scenario(base_miss_rate=0.08, origination_growth_mom=0.
 ## Architecture
 
 ```
-bnpl_model/
+bnpl_model/            PYTHON ENGINE (the logic — UI-agnostic, unchanged by the UI)
   config.py        EngineConfig — every parameter + defaults + validate() + presets
   ifrs9.py         IFRS 9: staging, sub-buckets, ECL = PD×LGD×EAD, allowance roll-forward
   engine.py        cohort roll-forward + 3-statement assembly + per-period invariant checks
   metrics.py       operational + financial metrics catalog
   invariants.py    tie-out checks (the proof the statements articulate)
   export.py        Excel workbook export
+server/
+  main.py          thin FastAPI wrapper: /api/schema, /api/run, /api/export (NO logic)
+web/                   REACT APP (primary UI — Vite + TypeScript + Recharts)
+  src/App.tsx      orchestrates: schema-driven controls -> live /api/run -> charts/tables
+  src/components/  Sidebar, KPI strip, banner, charts, data table, tabs
+  src/api.ts       typed API client
 app/
-  streamlit_app.py interactive dashboard (sliders, live statements, charts, scenario compare)
+  streamlit_app.py optional legacy Streamlit dashboard
 docs/
   model_spec.md            canonical engineering spec (the build was designed against this)
   ifrs9_source_of_truth.md the IFRS 9 methodology this model implements
 tests/
-  test_invariants.py       50-case scenario grid: every articulation invariant must hold
+  test_invariants.py       55-case scenario grid: every articulation invariant must hold
 outputs/
   sample_model.xlsx        example export
 ```

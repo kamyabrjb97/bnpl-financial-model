@@ -1,7 +1,17 @@
 # BNPL Financial Modeling Application — dependencies
+
+# Core engine
 pandas>=2.0
 numpy>=1.24
-streamlit>=1.30
 openpyxl>=3.1
-plotly>=5.18
+
+# React frontend backend (FastAPI wrapper over the engine)
+fastapi>=0.110
+uvicorn>=0.29
+
+# Tests
 pytest>=7.4
+
+# Optional legacy Streamlit UI (the primary UI is the React app in web/)
+streamlit>=1.30
+plotly>=5.18
