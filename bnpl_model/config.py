@@ -3,7 +3,7 @@ EngineConfig — every configurable input for the BNPL financial model.
 
 Mirrors Section A / the consolidated parameter table of docs/model_spec.md.
 Every threshold, rate and assumption is a named field with a default, so the
-Streamlit app and scenario tooling can flex any of them.
+app and scenario tooling can flex any of them.
 
 Design rules honoured here:
   * one frozen-ish dataclass (use `.scenario(**overrides)` to derive variants)
@@ -244,8 +244,8 @@ def default_roll_matrix() -> Dict[str, Dict[str, float]]:
 def preset_default() -> EngineConfig:
     """Calibrated baseline: 4-installment biweekly interest-free pay-in-4 for a
     growing early-stage book that reaches profitability as it scales. Used as the
-    Streamlit dashboard's starting scenario. (Raw `EngineConfig()` keeps the
-    spec's illustrative defaults.)"""
+    app's starting scenario. (Raw `EngineConfig()` keeps the spec's illustrative
+    defaults.)"""
     return EngineConfig(
         loans_origination_t0=2500,
         origination_growth_mom=0.06,

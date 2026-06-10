@@ -53,9 +53,8 @@ python -m uvicorn server.main:app --reload --port 8000   # terminal 1 (API)
 cd web && npm run dev                                     # terminal 2 (Vite :5173, proxies /api)
 ```
 
-The **React app** (`web/`) is the primary UI, served by a thin FastAPI layer (`server/`) that wraps the
-**unchanged** Python engine. An optional legacy Streamlit dashboard remains at `app/streamlit_app.py`
-(`streamlit run app/streamlit_app.py`).
+The **React app** (`web/`) is the UI, served by a thin FastAPI layer (`server/`) that wraps the
+Python engine. You can also use the engine programmatically or via the Excel export without any UI.
 
 ### Use the engine in code
 
@@ -102,12 +101,10 @@ bnpl_model/            PYTHON ENGINE (the logic — UI-agnostic, unchanged by th
   export.py        Excel workbook export
 server/
   main.py          thin FastAPI wrapper: /api/schema, /api/run, /api/export (NO logic)
-web/                   REACT APP (primary UI — Vite + TypeScript + Recharts)
+web/                   REACT APP (UI — Vite + TypeScript + Recharts)
   src/App.tsx      orchestrates: schema-driven controls -> live /api/run -> charts/tables
   src/components/  Sidebar, KPI strip, banner, charts, data table, tabs
   src/api.ts       typed API client
-app/
-  streamlit_app.py optional legacy Streamlit dashboard
 docs/
   model_spec.md            canonical engineering spec (the build was designed against this)
   ifrs9_source_of_truth.md the IFRS 9 methodology this model implements

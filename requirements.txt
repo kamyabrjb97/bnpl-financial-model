@@ -11,7 +11,3 @@ uvicorn>=0.29
 
 # Tests
 pytest>=7.4
-
-# Optional legacy Streamlit UI (the primary UI is the React app in web/)
-streamlit>=1.30
-plotly>=5.18
