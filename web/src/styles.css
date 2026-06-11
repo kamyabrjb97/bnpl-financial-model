@@ -49,9 +49,10 @@ body {
 .field.inline { flex-direction: row; align-items: center; gap: 8px; }
 .field-row { display: flex; justify-content: space-between; align-items: baseline; }
 .field-label { font-size: 12px; color: var(--muted); }
+.field-help { font-size: 11px; color: #6b7a90; line-height: 1.4; }
 .field-val { font-size: 12px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
 .field input[type="range"] { width: 100%; accent-color: var(--accent); }
-.field input[type="number"], .field select, .row input, .field select {
+.field input[type="number"], .field input[type="text"], .field select, .row input {
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 7px 9px; font-size: 13px; width: 100%;
 }

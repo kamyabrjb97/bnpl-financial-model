@@ -36,7 +36,19 @@ export default function App() {
     setLoading(true);
     debounceRef.current = window.setTimeout(() => {
       runModel(cfg)
-        .then((r) => { setResult(r); setError(null); })
+        .then((r) => {
+          setResult(r);
+          setError(null);
+          // In curve mode the Stage-2 PD is derived from the curve; keep the hidden
+          // fixed slider synced to it (snapped to the 0.005 step) so switching to
+          // "fixed" doesn't jump. Guarded to converge (no re-run loop).
+          if (cfg.pd_lifetime_stage2_mode === "marginal_curve" && typeof r.pd_lifetime_stage2_used === "number") {
+            const grid = Math.round(r.pd_lifetime_stage2_used / 0.005) * 0.005;
+            if (Math.abs((cfg.pd_lifetime_stage2_override ?? 0) - grid) > 1e-6) {
+              setCfg((c) => ({ ...(c as Cfg), pd_lifetime_stage2_override: grid }));
+            }
+          }
+        })
         .catch((e) => setError(String(e.message || e)))
         .finally(() => setLoading(false));
     }, 220);

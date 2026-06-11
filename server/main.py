@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException
@@ -24,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from bnpl_model import EngineConfig, run_model
 from bnpl_model.config import preset_default
+from bnpl_model.ifrs9 import lifetime_pd_stage2
 from bnpl_model.export import to_excel_bytes
 
 app = FastAPI(title="BNPL Model API", version="1.0.0")
@@ -48,14 +50,51 @@ def _records(df: pd.DataFrame, reset_index: bool = True) -> list[dict]:
     return json.loads(d.to_json(orient="records"))
 
 
+def _parse_curve(text: str) -> List[float]:
+    """Parse a comma/semicolon-separated marginal default curve string from the UI.
+
+    Rejects empty input, non-numeric tokens, and non-finite or out-of-[0,1] values
+    with a clean 400 (otherwise NaN/inf would slip through to a 500 at JSON encode,
+    and out-of-range values would silently mis-shape the curve)."""
+    tokens = [x.strip() for x in text.replace(";", ",").split(",") if x.strip() != ""]
+    if not tokens:
+        raise HTTPException(status_code=400,
+                            detail="marginal_default_curve must list at least one number")
+    out: List[float] = []
+    for tok in tokens:
+        try:
+            v = float(tok)
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail=f"marginal_default_curve: '{tok}' is not a number")
+        if not math.isfinite(v) or not (0.0 <= v <= 1.0):
+            raise HTTPException(status_code=400,
+                                detail=f"marginal_default_curve values must be between 0 and 1 (got '{tok}')")
+        out.append(v)
+    return out
+
+
 def _build_config(params: Dict[str, Any]) -> EngineConfig:
+    params = params or {}
     cfg = preset_default().to_dict()
     # only override known keys; ignore unknowns from the client
-    for k, v in (params or {}).items():
+    for k, v in params.items():
         if k in cfg:
             cfg[k] = v
     # opening cash tracks equity (the UI exposes a single "initial equity" lever)
     cfg["initial_cash"] = cfg.get("initial_equity", cfg["initial_cash"])
+
+    # --- marginal default curve: accept a comma/semicolon-separated string from the UI ---
+    mdc = cfg.get("marginal_default_curve")
+    if isinstance(mdc, str):
+        cfg["marginal_default_curve"] = _parse_curve(mdc)
+
+    # --- Stage-2 lifetime PD method (UI-only control, not an EngineConfig field) ---
+    # "marginal_curve" -> derive from the curve (override = None); "fixed" -> use the slider value.
+    mode = params.get("pd_lifetime_stage2_mode")
+    if mode == "marginal_curve":
+        cfg["pd_lifetime_stage2_override"] = None
+    # if mode == "fixed" (or unset), keep whatever pd_lifetime_stage2_override was merged in
     # normalise macro scenario probabilities to sum to 1 (lenient input)
     tot = cfg["scenario_prob_base"] + cfg["scenario_prob_upside"] + cfg["scenario_prob_downside"]
     if tot > 0:
@@ -98,7 +137,20 @@ def _kpis(res) -> dict:
 @app.get("/api/schema")
 def schema():
     """Default parameter values + the control metadata that drives the UI."""
-    return {"defaults": preset_default().to_dict(), "groups": CONTROL_GROUPS}
+    cfg = preset_default()
+    defaults = cfg.to_dict()
+    # Stage-2 lifetime PD method: default to deriving from the marginal curve (the
+    # engine's behaviour when no override is set). Seed the fixed-point slider with
+    # the derived value so switching to "fixed" starts consistent.
+    defaults["pd_lifetime_stage2_mode"] = (
+        "fixed" if defaults.get("pd_lifetime_stage2_override") is not None else "marginal_curve")
+    if defaults.get("pd_lifetime_stage2_override") is None:
+        # snap the seed to the slider step (0.005) so the control can represent it exactly
+        defaults["pd_lifetime_stage2_override"] = round(round(lifetime_pd_stage2(cfg) / 0.005) * 0.005, 4)
+    # expose the marginal default curve as an editable comma-separated string
+    curve = defaults.get("marginal_default_curve") or []
+    defaults["marginal_default_curve"] = ", ".join(f"{x:g}" for x in curve)
+    return {"defaults": defaults, "groups": CONTROL_GROUPS}
 
 
 @app.post("/api/run")
@@ -107,6 +159,10 @@ def run(params: Dict[str, Any] | None = None):
     res = run_model(cfg)
     return {
         "config": cfg.to_dict(),
+        # The Stage-2 lifetime PD actually used (derived from the curve, or the fixed
+        # override). The UI syncs the fixed slider to this in curve mode so switching
+        # methods doesn't jump the value.
+        "pd_lifetime_stage2_used": float(lifetime_pd_stage2(cfg)),
         "kpis": _kpis(res),
         "income_statement": _records(res.income_statement),
         "cash_flow": _records(res.cash_flow),
@@ -196,6 +252,16 @@ CONTROL_GROUPS = [
     {"title": "IFRS 9 — staging & ECL", "icon": "bank", "fields": [
         {"key": "staging_basis", "label": "Staging basis", "type": "select", "options": ["tight_bnpl", "standard"]},
         {"key": "pd_12m_stage1", "label": "PD Stage 1 (12m)", "type": "slider", "min": 0, "max": 0.3, "step": 0.005, "fmt": "pct"},
+        {"key": "pd_lifetime_stage2_mode", "label": "PD Stage 2 (lifetime) method", "type": "select",
+         "options": ["marginal_curve", "fixed"],
+         "help": "How the Stage-2 lifetime PD is SET: derive it from the marginal default curve below, or pin a fixed value."},
+        {"key": "pd_lifetime_stage2_override", "label": "PD Stage 2 (lifetime) — fixed", "type": "slider",
+         "min": 0, "max": 0.6, "step": 0.005, "fmt": "pct",
+         "showIf": {"key": "pd_lifetime_stage2_mode", "equals": "fixed"}},
+        {"key": "marginal_default_curve", "label": "Marginal default curve (per month, comma-separated)",
+         "type": "text",
+         "help": "Monthly marginal default rates (0-1). Always shapes WHEN defaults occur in the cohort engine; "
+                 "in 'marginal_curve' method it also sets the Stage-2 lifetime PD = 1 - product(1 - rate)."},
         {"key": "lgd_stage1", "label": "LGD Stage 1", "type": "slider", "min": 0, "max": 1, "step": 0.05, "fmt": "pct"},
         {"key": "lgd_stage2", "label": "LGD Stage 2", "type": "slider", "min": 0, "max": 1, "step": 0.05, "fmt": "pct"},
         {"key": "lgd_s3_substandard", "label": "LGD S3 Substandard", "type": "slider", "min": 0, "max": 1, "step": 0.05, "fmt": "pct"},
@@ -211,7 +277,10 @@ CONTROL_GROUPS = [
         {"key": "scenario_prob_base", "label": "P(base)", "type": "slider", "min": 0, "max": 1, "step": 0.05, "fmt": "pct"},
         {"key": "scenario_prob_upside", "label": "P(upside)", "type": "slider", "min": 0, "max": 1, "step": 0.05, "fmt": "pct"},
         {"key": "scenario_prob_downside", "label": "P(downside)", "type": "slider", "min": 0, "max": 1, "step": 0.05, "fmt": "pct"},
+        {"key": "pd_multiplier_upside", "label": "Upside PD multiplier", "type": "slider", "min": 0.2, "max": 1, "step": 0.05},
         {"key": "pd_multiplier_downside", "label": "Downside PD multiplier", "type": "slider", "min": 1, "max": 3, "step": 0.05},
+        {"key": "lgd_multiplier_upside", "label": "Upside LGD multiplier", "type": "slider", "min": 0.5, "max": 1, "step": 0.05},
+        {"key": "lgd_multiplier_downside", "label": "Downside LGD multiplier", "type": "slider", "min": 1, "max": 2, "step": 0.05},
     ]},
     {"title": "Funding, opex & tax", "icon": "building", "fields": [
         {"key": "funding_advance_rate", "label": "Funding advance rate", "type": "slider", "min": 0, "max": 1, "step": 0.05, "fmt": "pct"},

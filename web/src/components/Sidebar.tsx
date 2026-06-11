@@ -54,6 +54,19 @@ function Field({ f, cfg, onChange }: { f: FieldDef; cfg: Cfg; onChange: (k: stri
             <option key={String(o)} value={String(o)}>{String(o)}</option>
           ))}
         </select>
+        {f.help && <span className="field-help">{f.help}</span>}
+      </label>
+    );
+  }
+  if (f.type === "text") {
+    return (
+      <label className="field">
+        <span className="field-label">{f.label}</span>
+        <input
+          type="text" value={value ?? ""}
+          onChange={(e) => onChange(f.key, e.target.value)}
+        />
+        {f.help && <span className="field-help">{f.help}</span>}
       </label>
     );
   }

@@ -6,12 +6,13 @@ export type Row = Record<string, number | string | null>;
 export interface FieldDef {
   key: string;
   label: string;
-  type: "slider" | "number" | "select" | "checkbox";
+  type: "slider" | "number" | "select" | "checkbox" | "text";
   min?: number;
   max?: number;
   step?: number;
   options?: (string | number)[];
   fmt?: "pct";
+  help?: string;
   showIf?: { key: string; equals: any };
 }
 export interface Group {
@@ -47,6 +48,7 @@ export interface InvRow {
 
 export interface RunResult {
   config: Cfg;
+  pd_lifetime_stage2_used: number;
   kpis: Kpis;
   income_statement: Row[];
   cash_flow: Row[];
