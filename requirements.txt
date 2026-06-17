@@ -1,15 +1,20 @@
 # BNPL Financial Modeling Application — dependencies
 # Requires Python >= 3.10 (PEP 604 `X | None` annotations evaluated by FastAPI).
+#
+# Each line is floor,<next-major so a fresh clone can't silently pull a breaking
+# major bump. The "verified" annotation is the version this project has been run
+# and tested against; the cap sits one major above it.
+# Install into a virtualenv with:  python -m pip install -r requirements.txt
 
 # Core engine
-pandas>=2.0
-numpy>=1.24
-openpyxl>=3.1          # used by pandas ExcelWriter for the Excel export
+pandas>=2.0,<4.0       # verified 3.0.3
+numpy>=1.24,<3.0       # verified 2.4.6
+openpyxl>=3.1,<4.0     # used by pandas ExcelWriter for the Excel export; verified 3.1.5
 
 # React frontend backend (FastAPI wrapper over the engine)
-fastapi>=0.110
-uvicorn>=0.29
+fastapi>=0.110,<1.0    # verified 0.133.1
+uvicorn>=0.29,<1.0     # verified 0.41.0
 
 # Tests
-pytest>=7.4
-httpx>=0.27           # required by fastapi.testclient.TestClient (server tests)
+pytest>=7.4,<10.0      # verified 9.0.2
+httpx>=0.27,<1.0       # required by fastapi.testclient.TestClient (server tests); verified 0.28.1
