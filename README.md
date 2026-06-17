@@ -33,14 +33,13 @@ statements every period.
 ## Quick start
 
 ```bash
-# ---- Python engine + FastAPI (use a venv so `pip` and `python` agree) ----
 python -m venv .venv
 # Windows (PowerShell):  .venv\Scripts\Activate.ps1
 # macOS / Linux:         source .venv/bin/activate
-python -m pip install -r requirements.txt   # `python -m pip` installs into THIS interpreter
+python -m pip install -r requirements.txt  
 
 # ---- React app (primary UI) ----
-cd web && npm ci && npm run build && cd ..   # `npm ci` = exact versions from the committed lockfile
+cd web && npm ci && npm run build && cd ..  
 python -m uvicorn server.main:app --port 8000
 # open http://localhost:8000
 
