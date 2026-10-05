@@ -160,3 +160,34 @@ def test_cashneg_flag_is_feasibility_not_articulation():
     assert rep[rep["category"] == "articulation"]["passed"].all()   # tie-outs hold
     assert not rep[rep["id"] == "H-CASHNEG"]["passed"].iloc[0]      # feasibility flagged
     assert_invariants(res, articulation_only=True)                  # does not raise
+
+
+def _single_cohort_12m(accel: bool):
+    """One 12-installment monthly cohort, aged long enough to fully resolve."""
+    T = 24
+    return run_model(EngineConfig(
+        horizon_months=T, n_installments=12, cadence_mode="monthly",
+        origination_growth_mode="explicit_vector", origination_vector=[1000] + [0] * (T - 1),
+        base_miss_rate=0.025, first_payment_default_rate=0.04, prepayment_rate=0.0,
+        charge_off_dpd=120, acceleration_on_default=accel))
+
+
+def test_acceleration_only_forfeits_defaulting_loans_remaining_principal():
+    """Acceleration charges off the defaulting loans' OWN remaining principal, not a
+    slice of the performing book. Each defaulting loan has >= 1 installment in arrears,
+    so its whole-loan loss is at most (N-1) x its charged-off arrears: the accelerated
+    write-off can never exceed (N-1) x the no-acceleration write-off. (The old pro-rata
+    formula blew through this bound: ~15.8% vintage loss vs a ~2.4% ceiling.)"""
+    no_acc = _single_cohort_12m(False).portfolio["write_offs"].sum()
+    acc = _single_cohort_12m(True).portfolio["write_offs"].sum()
+    assert no_acc > 0
+    assert acc > no_acc                     # remaining schedule exists at charge-off
+    assert acc <= no_acc * (12 - 1) + 1e-6
+
+
+def test_acceleration_is_noop_when_loan_matures_before_charge_off():
+    """Pay-in-4 biweekly matures in ~6 weeks, long before 120 DPD: nothing to accelerate."""
+    kw = dict(horizon_months=18, n_installments=4, cadence_mode="biweekly", charge_off_dpd=120)
+    on = run_model(EngineConfig(acceleration_on_default=True, **kw)).portfolio["write_offs"].sum()
+    off = run_model(EngineConfig(acceleration_on_default=False, **kw)).portfolio["write_offs"].sum()
+    assert on == pytest.approx(off, rel=1e-12)

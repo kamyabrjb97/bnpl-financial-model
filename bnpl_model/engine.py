@@ -97,6 +97,9 @@ class Engine:
             g[a] = (sched[a] / remaining) if remaining > 1e-12 else 0.0
         self.g = g
         self.first_due_age = int(np.argmax(sched > 0)) if sched.sum() > 0 else 0
+        # rem_after[a] = contractual fraction of P_rem still scheduled AFTER age a's dues
+        # (the CUR principal a single loan still holds once age a has been billed)
+        self.rem_after = np.array([sched[a + 1:].sum() for a in range(max_age + 1)])
 
         # ---- per-installment miss rate, blended (principal-weighted) by age ----
         # The first POST-ORIGINATION installment (j=1, i.e. installment 2) carries the
@@ -220,7 +223,6 @@ class Engine:
 
         for t in range(T):
             gross_open = bal.sum()               # opening gross receivable
-            live_open_total = gross_open
             # ---------- Step 0: originate cohort t ----------
             O_t = self.O[t]
             cum_originated[t] = O_t
@@ -288,12 +290,18 @@ class Engine:
                 # newly missed -> D1
                 new_b[BIDX["D1"]] += missed
 
-                # acceleration on default: defaulting loans forfeit remaining CUR
-                if cfg.acceleration_on_default and wo > 0 and live_open_total > 0:
-                    base_live = opening.sum() - opening[BIDX["CUR"]]
-                    if base_live > 1e-12:
-                        accel = new_b[BIDX["CUR"]] * min(1.0, wo / base_live)
-                        accel = min(accel, new_b[BIDX["CUR"]])
+                # acceleration on default: ONLY the defaulting loans forfeit their own
+                # remaining CUR principal. Charged-off arrears / avg installment ~ number
+                # of defaulting loans; each still holds the contractual remainder after
+                # age a (shrunk by prepayment). Performing loans' CUR is untouched.
+                if (cfg.acceleration_on_default and wo > 0 and cfg.n_installments > 1
+                        and a < len(self.rem_after)):
+                    avg_inst = self.per_loan_after_orig[m] / (cfg.n_installments - 1)
+                    if avg_inst > 1e-9:
+                        n_default = wo / avg_inst
+                        rem_per_loan = (self.per_loan_after_orig[m] * self.rem_after[a]
+                                        * (1.0 - cfg.prepayment_rate) ** (a + 1))
+                        accel = min(n_default * rem_per_loan, new_b[BIDX["CUR"]])
                         new_b[BIDX["CUR"]] -= accel
                         wo += accel
 
