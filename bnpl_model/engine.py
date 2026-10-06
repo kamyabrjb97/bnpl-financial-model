@@ -125,6 +125,12 @@ class Engine:
             miss_by_age[a] = (num / den) if den > 1e-12 else 0.0
         self.miss_by_age = miss_by_age
 
+        # ---- late-fee cap: share of late-fee events that survive the per-loan cap ----
+        # Misses per loan K ~ Poisson-binomial over installments 2..N (rates above).
+        # A loan pays at most cap/fee events, so the capped share is E[min(K,k)]/E[K].
+        self.late_fee_cap_factor = self._late_fee_cap_factor(
+            [_inst_rate(j) for j in range(1, N)])
+
         # origination counts O[m]
         O = np.zeros(T)
         if cfg.origination_growth_mode == "explicit_vector" and cfg.origination_vector:
@@ -186,6 +192,53 @@ class Engine:
             if m < T:
                 arr[m] += total
 
+    def _late_fee_cap_factor(self, rates: List[float]) -> float:
+        cfg = self.cfg
+        mean = sum(rates)
+        if mean <= 1e-12 or cfg.late_fee_amount <= 0:
+            return 1.0
+        k_cap = max(0.0, cfg.late_fee_cap_per_loan) / cfg.late_fee_amount
+        dist = np.zeros(len(rates) + 1)        # dist[k] = P(K = k)
+        dist[0] = 1.0
+        for r in rates:
+            dist[1:] = dist[1:] * (1.0 - r) + dist[:-1] * r
+            dist[0] *= (1.0 - r)
+        capped = sum(p * min(k, k_cap) for k, p in enumerate(dist))
+        return float(capped / mean)
+
+    def _rem_per_loan(self, m: int, a: int) -> float:
+        """Contractual CUR principal one loan of cohort m still holds once age a has
+        been billed (net of prepayment)."""
+        if a >= len(self.rem_after):
+            return 0.0
+        return float(self.per_loan_after_orig[m] * self.rem_after[a]
+                     * (1.0 - self.cfg.prepayment_rate) ** (a + 1))
+
+    def _exposure_buckets(self, m: int, a: int, row: np.ndarray) -> np.ndarray:
+        """Re-cut a cohort's bucket balances to the instrument level for staging/ECL.
+
+        The roll machine only moves the *missed installment* into D1+; the same loan's
+        not-yet-due principal stays in CUR. IFRS 9 stages the whole exposure, so each
+        delinquent bucket also carries its loans' remaining CUR principal
+        (arrears / avg installment ~ loans in the bucket). Gross is unchanged."""
+        out = row.copy()
+        cur = row[BIDX["CUR"]]
+        N = self.cfg.n_installments
+        if cur <= 1e-12 or N <= 1:
+            return out
+        avg_inst = self.per_loan_after_orig[m] / (N - 1)
+        rem = self._rem_per_loan(m, a)
+        if avg_inst <= 1e-9 or rem <= 0:
+            return out
+        idx = [BIDX[b] for b in DELINQ_BUCKETS]
+        linked = row[idx] / avg_inst * rem
+        tot = linked.sum()
+        if tot > cur:
+            linked *= cur / tot
+        out[idx] += linked
+        out[BIDX["CUR"]] -= linked.sum()
+        return out
+
     def _miss_rate(self, age: int) -> float:
         """Principal-weighted blended miss rate for the installments maturing at this
         cohort age (precomputed in _precompute; FPD applies only to installment 2)."""
@@ -223,6 +276,7 @@ class Engine:
 
         for t in range(T):
             gross_open = bal.sum()               # opening gross receivable
+            performing_open = bal[:, BIDX["CUR"]].sum()   # balance whose dues are being paid
             # ---------- Step 0: originate cohort t ----------
             O_t = self.O[t]
             cum_originated[t] = O_t
@@ -299,9 +353,7 @@ class Engine:
                     avg_inst = self.per_loan_after_orig[m] / (cfg.n_installments - 1)
                     if avg_inst > 1e-9:
                         n_default = wo / avg_inst
-                        rem_per_loan = (self.per_loan_after_orig[m] * self.rem_after[a]
-                                        * (1.0 - cfg.prepayment_rate) ** (a + 1))
-                        accel = min(n_default * rem_per_loan, new_b[BIDX["CUR"]])
+                        accel = min(n_default * self._rem_per_loan(m, a), new_b[BIDX["CUR"]])
                         new_b[BIDX["CUR"]] -= accel
                         wo += accel
 
@@ -309,7 +361,7 @@ class Engine:
                 if cfg.late_fee_mode != "none" and missed > 0 and cfg.n_installments > 1:
                     avg_inst = self.per_loan_after_orig[m] / (cfg.n_installments - 1)
                     if avg_inst > 1e-9:
-                        late_events += missed / avg_inst
+                        late_events += missed / avg_inst * self.late_fee_cap_factor
 
                 # schedule recovery on this month's write-offs
                 if wo > 0 and cfg.recovery_rate > 0:
@@ -335,7 +387,13 @@ class Engine:
                 missed_total += missed
 
             # ---------- aggregate closing state ----------
-            agg_bucket = {b: bal[:, BIDX[b]].sum() for b in LIVE_BUCKETS}
+            # staging works on instrument-level exposure (arrears + the loan's own
+            # remaining CUR), not the raw roll-machine buckets
+            expo = np.zeros(NLB)
+            for m in range(t + 1):
+                if bal[m].sum() > 1e-12:
+                    expo += self._exposure_buckets(m, t - m, bal[m])
+            agg_bucket = {b: expo[BIDX[b]] for b in LIVE_BUCKETS}
             gross_close = sum(agg_bucket.values())
 
             # recoveries landing this period
@@ -354,12 +412,17 @@ class Engine:
             allowance = alw.allowance_close
 
             # ---------- Income statement (accrual) ----------
-            interest_income = (cfg.apr / 12.0) * gross_open if cfg.apr > 0 else 0.0
+            # interest accrues (and is collected) on the performing CUR balance only:
+            # missed installments in D1+ pay nothing, so they earn no cash interest
+            interest_income = (cfg.apr / 12.0) * performing_open if cfg.apr > 0 else 0.0
             merch_income = self.recog_merchant[t]
             cons_income = self.recog_consumer[t]
             late_assessed = late_events * cfg.late_fee_amount
             late_cash = late_assessed * cfg.late_fee_collection_rate
             late_income = late_cash if cfg.late_fee_recognition == "cash_basis" else late_assessed
+            # accrual books the assessed fee; the share not collected in-period is
+            # written off as uncollectible (no late-fee receivable is carried)
+            late_uncollectible = late_income - late_cash
             recovery_income = recoveries_cash if cfg.recovery_accounting == "pnl_other_income" else 0.0
             total_revenue = interest_income + merch_income + cons_income + late_income + recovery_income
 
@@ -378,7 +441,7 @@ class Engine:
                     + cfg.opex_per_active_loan * active_loans
                     + cfg.opex_pct_of_gmv * GMV_t)
 
-            ebt = total_revenue - funding_cost - provision - opex
+            ebt = total_revenue - funding_cost - provision - late_uncollectible - opex
             # tax with NOL carryforward
             if ebt <= 0:
                 tax = 0.0
@@ -455,7 +518,8 @@ class Engine:
                 consumer_fee_income=cons_income, late_fee_income=late_income,
                 recovery_income=recovery_income, total_revenue=total_revenue,
                 funding_cost=funding_cost, net_interest_fee_income=total_revenue - funding_cost,
-                provision_expense=provision, operating_expense=opex, ebt=ebt,
+                provision_expense=provision, late_fee_uncollectible=late_uncollectible,
+                operating_expense=opex, ebt=ebt,
                 income_tax=tax, net_income=net_income, dividends=dividends))
             rows_cf.append(dict(
                 month=t, net_income=net_income, provision_addback=provision,

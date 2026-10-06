@@ -203,8 +203,15 @@ defaults and units). Highlights, all adjustable in the dashboard:
 
 * Loan **originations** are exact; **active / per-stage loan counts** are balance-weighted estimates
   (the financials are driven by exact principal balances).
-* Interest income is recognized = collected in-period (no accrued-interest receivable); irrelevant
-  at `apr = 0`. Working capital is modeled via the deferred-fee liability and an opex payable.
+* Interest income is recognized = collected in-period on the **performing (current) balance only**
+  (missed installments earn no cash interest; no accrued-interest receivable); irrelevant at `apr = 0`.
+  Working capital is modeled via the deferred-fee liability and an opex payable.
+* IFRS 9 staging is **instrument-level**: a loan with an installment in arrears is staged together
+  with its remaining not-yet-due principal. Stage-2 lifetime PD defaults to a per-bucket value solved
+  from the roll matrix (`pd_stage2_method="roll_matrix"`), so ECL anticipates the realised charge-offs.
+* Late fees are capped per loan (`late_fee_cap_per_loan`) via the expected share of misses below the
+  cap. Under `late_fee_recognition="accrual"` the uncollected share is written off as
+  `late_fee_uncollectible`, so net income matches the cash basis.
 * Default PD/LGD values are **illustrative BNPL benchmarks** — replace with your own model outputs.
 
 ---

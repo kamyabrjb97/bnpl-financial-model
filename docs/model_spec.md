@@ -248,7 +248,7 @@ For each `t`, execute in this exact order (ordering is load-bearing for tie-out)
 
 6. **Recovery scheduling.** Each `WriteOffs` slice schedules recovery cash `recovery_rate·WriteOffs` at `t + recovery_lag_months` (or spread via `recovery_curve`).
 
-7. **Late fees.** Assess `late_fee_amount` per delinquency event (capped by `late_fee_cap_per_loan`); cash = `late_fee_collection_rate · assessed`; revenue per `late_fee_recognition`.
+7. **Late fees.** Assess `late_fee_amount` per delinquency event (capped by `late_fee_cap_per_loan`); cash = `late_fee_collection_rate · assessed`; revenue per `late_fee_recognition`. Under `accrual`, the assessed-but-uncollected amount is expensed as `late_fee_uncollectible` in the same period (no late-fee receivable is carried).
 
 8. **Override / forbearance flags & cure clock** updated (C.2). DPD reset on restructure does NOT reset stage.
 
@@ -271,6 +271,8 @@ Rows = opening bucket, columns = destination; each row sums to 1.0. Defaults ill
 For `charge_off_dpd=365`, extend rows `D120→D180→D365` with stay/forward/cure and charge-off only from `D365`. The matrix is stored as `roll_matrix[from] -> {dest: prob}`; engine validates each row sums to 1.0 (H-ROLL) and obeys the charge-off-edge constraint (H-CO).
 
 ### B.7 Default / vintage curve and PD reconciliation — [FIX-PD]
+
+> **Implementation note (supersedes the curve-only derivation below).** The engine defaults to `pd_stage2_method = "roll_matrix"`: Stage-2 lifetime PD is solved per DPD bucket as the probability of eventually reaching charge-off under the same roll matrix the cohort engine runs (`p_b = (forward·p_next + charge_off) / (1 − stay)`). The curve-derived PD below remains available as `pd_stage2_method = "marginal_curve"`, and `pd_lifetime_stage2_override` pins a fixed value. Staging is applied at the instrument level: each delinquent bucket also carries its loans' remaining not-yet-due principal.
 
 `marginal_default_curve` gives marginal default propensity by months-on-book (illustrative BNPL shape, peaks early):
 
@@ -405,7 +407,7 @@ Period `t`. `Net_Income` flows to retained earnings (F) and is the start of the 
 
 | # | Line | Formula / source |
 |---|---|---|
-| 1 | Interest income | `Σ accrued interest recognized in t` (0 if apr=0; per `interest_basis`) |
+| 1 | Interest income | `apr/12 · opening performing (CUR) balance` — missed installments earn no interest (0 if apr=0) |
 | 2 | Merchant fee income | recognized per `merchant_fee_recognition` (default upfront: full at origination) **[FIX-FEE]** |
 | 3 | Consumer fee income | recognized per `consumer_fee_recognition` (default deferred SL over loan life) |
 | 4 | Late fee income | per `late_fee_recognition`; default cash basis = collected portion |

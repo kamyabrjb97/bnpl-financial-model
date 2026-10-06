@@ -90,10 +90,12 @@ def _build_config(params: Dict[str, Any]) -> EngineConfig:
         cfg["marginal_default_curve"] = _parse_curve(mdc)
 
     # --- Stage-2 lifetime PD method (UI-only control, not an EngineConfig field) ---
-    # "marginal_curve" -> derive from the curve (override = None); "fixed" -> use the slider value.
+    # "roll_matrix" / "marginal_curve" -> derive (override = None) by that method;
+    # "fixed" -> use the slider value.
     mode = params.get("pd_lifetime_stage2_mode")
-    if mode == "marginal_curve":
+    if mode in ("roll_matrix", "marginal_curve"):
         cfg["pd_lifetime_stage2_override"] = None
+        cfg["pd_stage2_method"] = mode
     # if mode == "fixed" (or unset), keep whatever pd_lifetime_stage2_override was merged in
     # normalise macro scenario probabilities to sum to 1 (lenient input)
     tot = cfg["scenario_prob_base"] + cfg["scenario_prob_upside"] + cfg["scenario_prob_downside"]
@@ -103,10 +105,12 @@ def _build_config(params: Dict[str, Any]) -> EngineConfig:
         cfg["scenario_prob_downside"] /= tot
     else:
         cfg["scenario_prob_base"], cfg["scenario_prob_upside"], cfg["scenario_prob_downside"] = 0.5, 0.2, 0.3
-    # keep installment weights consistent with the installment count
-    n = int(cfg["n_installments"])
-    cfg["installment_weights"] = [1.0 / n] * n
     try:
+        # keep installment weights consistent with the installment count
+        n = int(cfg["n_installments"])
+        if n < 1:
+            raise ValueError("n_installments must be >= 1")
+        cfg["installment_weights"] = [1.0 / n] * n
         return EngineConfig(**cfg).validate()
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -143,7 +147,8 @@ def schema():
     # engine's behaviour when no override is set). Seed the fixed-point slider with
     # the derived value so switching to "fixed" starts consistent.
     defaults["pd_lifetime_stage2_mode"] = (
-        "fixed" if defaults.get("pd_lifetime_stage2_override") is not None else "marginal_curve")
+        "fixed" if defaults.get("pd_lifetime_stage2_override") is not None
+        else defaults["pd_stage2_method"])
     if defaults.get("pd_lifetime_stage2_override") is None:
         # snap the seed to the slider step (0.005) so the control can represent it exactly
         defaults["pd_lifetime_stage2_override"] = round(round(lifetime_pd_stage2(cfg) / 0.005) * 0.005, 4)
@@ -202,8 +207,14 @@ if os.path.isdir(DIST):
 
     @app.get("/{path:path}")
     def spa(path: str):
-        candidate = os.path.join(DIST, path)
-        if os.path.isfile(candidate):
+        # resolve and confine to DIST: an absolute path or ../ must not escape it
+        root = os.path.realpath(DIST)
+        candidate = os.path.realpath(os.path.join(root, path))
+        try:
+            inside = os.path.commonpath([root, candidate]) == root
+        except ValueError:                     # different drive on Windows
+            inside = False
+        if inside and os.path.isfile(candidate):
             return FileResponse(candidate)
         return FileResponse(os.path.join(DIST, "index.html"))  # SPA fallback
 
@@ -253,8 +264,9 @@ CONTROL_GROUPS = [
         {"key": "staging_basis", "label": "Staging basis", "type": "select", "options": ["tight_bnpl", "standard"]},
         {"key": "pd_12m_stage1", "label": "PD Stage 1 (12m)", "type": "slider", "min": 0, "max": 0.3, "step": 0.005, "fmt": "pct"},
         {"key": "pd_lifetime_stage2_mode", "label": "PD Stage 2 (lifetime) method", "type": "select",
-         "options": ["marginal_curve", "fixed"],
-         "help": "How the Stage-2 lifetime PD is SET: derive it from the marginal default curve below, or pin a fixed value."},
+         "options": ["roll_matrix", "marginal_curve", "fixed"],
+         "help": "How the Stage-2 lifetime PD is SET: per bucket from the roll matrix (consistent with "
+                 "realised charge-offs), from the marginal default curve below, or a fixed value."},
         {"key": "pd_lifetime_stage2_override", "label": "PD Stage 2 (lifetime) — fixed", "type": "slider",
          "min": 0, "max": 0.6, "step": 0.005, "fmt": "pct",
          "showIf": {"key": "pd_lifetime_stage2_mode", "equals": "fixed"}},

@@ -201,14 +201,24 @@ export function ScenarioCompare({
   const [metric, setMetric] = useState("net_income");
   const def = COMPARE_METRICS.find((m) => m.key === metric)!;
 
-  // build merged chart data: month -> { [scenarioName]: value }
+  // names must be unique: suffix a repeat, then advance the default for the next save
+  const save = () => {
+    const taken = new Set(saved.map((s) => s.name));
+    const base = name.trim() || `Scenario ${saved.length + 1}`;
+    let unique = base;
+    for (let n = 2; taken.has(unique); n++) unique = `${base} (${n})`;
+    onSave(unique);
+    setName(`Scenario ${saved.length + 2}`);
+  };
+
+  // build merged chart data: month -> { s<i>: value } (keyed by index, not name)
   const series = [{ name: "▶ Current (live)", result: current }, ...saved];
   const months = (current[def.src] as Row[]).map((x) => x.month as number);
   const data = months.map((m, i) => {
     const row: Row = { month: m };
-    series.forEach((s) => {
+    series.forEach((s, j) => {
       const src = s.result[def.src] as Row[];
-      row[s.name] = (src[i]?.[metric] as number) ?? null;
+      row[`s${j}`] = (src[i]?.[metric] as number) ?? null;
     });
     return row;
   });
@@ -218,7 +228,7 @@ export function ScenarioCompare({
       <p className="muted">Save the current assumptions as a named scenario, then compare key trajectories.</p>
       <div className="row gap">
         <input className="grow" value={name} onChange={(e) => setName(e.target.value)} placeholder="Scenario name" />
-        <button className="btn" onClick={() => onSave(name)}>💾 Save current</button>
+        <button className="btn" onClick={save}>💾 Save current</button>
         <button className="btn-ghost" onClick={onClear}>🗑️ Clear all</button>
       </div>
       <div className="row gap" style={{ marginTop: 12 }}>
@@ -231,7 +241,7 @@ export function ScenarioCompare({
       </div>
       <LineCard title={`Scenario comparison — ${title(metric)}`} data={data} asPct={def.pct}
         series={series.map((s, i) => ({
-          key: s.name, name: s.name,
+          key: `s${i}`, name: s.name,
           color: [COLORS.accent, COLORS.green, COLORS.amber, COLORS.red, COLORS.cyan, COLORS.violet][i % 6],
         }))} height={360} />
       {saved.length > 0 && (

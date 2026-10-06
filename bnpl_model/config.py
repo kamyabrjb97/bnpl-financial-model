@@ -106,8 +106,12 @@ class EngineConfig:
     eir_annual: Optional[float] = None
     ecl_discount_enabled: bool = False
     ead_include_accrued_interest: bool = True
-    # explicit Stage-2 lifetime PD override; if None it is derived from the
-    # marginal_default_curve (keeps cohort engine and ECL consistent, [FIX-PD])
+    # How Stage-2 lifetime PD is derived when no override is set:
+    #   roll_matrix    -> per bucket, P(eventually charged off) under the same roll matrix
+    #                     the cohort engine uses (ECL consistent with realised losses)
+    #   marginal_curve -> one portfolio PD = 1 - prod(1 - marginal_default_curve)
+    pd_stage2_method: str = "roll_matrix"
+    # explicit Stage-2 lifetime PD override (wins over pd_stage2_method when set)
     pd_lifetime_stage2_override: Optional[float] = None
 
     # ----- A.7 Macro overlays -----
@@ -203,6 +207,8 @@ class EngineConfig:
             errs.append("initial_cash must be <= initial_equity")
         if self.staging_basis not in ("standard", "tight_bnpl"):
             errs.append(f"unknown staging_basis {self.staging_basis}")
+        if self.pd_stage2_method not in ("roll_matrix", "marginal_curve"):
+            errs.append(f"unknown pd_stage2_method {self.pd_stage2_method}")
         if self.seasonality is not None and len(self.seasonality) != 12:
             errs.append(f"seasonality must have length 12, got {len(self.seasonality)}")
         if self.apr <= -1.0:

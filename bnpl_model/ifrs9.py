@@ -7,8 +7,9 @@ Key disciplines:
   * DPD bucket edges sit exactly on staging/sub-bucket thresholds  [FIX-BKT]
   * staging is the WORST of the DPD-based stage and any override   (C.1)
   * Stage 3 PD is forced to 1.0                                    (H-S3PD)
-  * Stage 2 lifetime PD derived from the same marginal default curve the
-    cohort engine uses, so realised charge-offs and ECL are consistent [FIX-PD]
+  * Stage 2 lifetime PD, by default, is solved per bucket from the same roll
+    matrix the cohort engine runs, so realised charge-offs and ECL are consistent
+    [FIX-PD]; a marginal-curve PD or a fixed override can be selected instead
   * allowance is solved as the P&L "plug" off a bottom-up required ECL, so
     allowance[t] == required_ecl[t] by construction              (H-ALW1/2)
 """
@@ -83,7 +84,8 @@ def lgd_for_bucket(bucket: str, stage: int, cfg: EngineConfig) -> float:
 
 
 def lifetime_pd_stage2(cfg: EngineConfig) -> float:
-    """Stage-2 lifetime PD derived from the marginal default curve [FIX-PD].
+    """Portfolio-wide Stage-2 lifetime PD from the marginal default curve (used when
+    pd_stage2_method == "marginal_curve"; see roll_matrix_pd for the default).
 
     pd_lifetime = 1 - prod(1 - marginal_pd) over the FULL curve. Overridable.
 
@@ -101,10 +103,44 @@ def lifetime_pd_stage2(cfg: EngineConfig) -> float:
     return max(0.0, min(1.0, 1.0 - surv))
 
 
-def base_pd_for_stage(stage: int, cfg: EngineConfig, pd_life2: float) -> float:
+def roll_matrix_pd(cfg: EngineConfig) -> Dict[str, float]:
+    """P(a balance in each live bucket is eventually charged off) under the roll matrix.
+
+    Absorbing-chain solve from the worst bucket down: cure absorbs as no-default,
+    stay is a self-loop, forward moves to the next bucket (or charges off at the
+    edge). p_b = (forward * p_next + charge_off) / (1 - stay). This is the same
+    machine the cohort engine runs, so Stage-2 ECL anticipates the realised loss.
+    A re-default after cure is ignored (PD is a lower bound in that respect)."""
+    co_dpd = cfg.charge_off_dpd
+    pd: Dict[str, float] = {}
+    for b in reversed(LIVE_BUCKETS):
+        if b == "CUR":
+            continue
+        if BUCKET_LOWER_DPD[b] >= co_dpd:
+            pd[b] = 1.0
+            continue
+        row = cfg.roll_matrix.get(b)
+        if row is None:                       # engine holds the balance forever
+            pd[b] = 0.0
+            continue
+        nb = NEXT_BUCKET[b]
+        p_next = 1.0 if nb == "CHARGED_OFF" or BUCKET_LOWER_DPD.get(nb, 10**9) >= co_dpd \
+            else pd[nb]
+        leave = 1.0 - row.get("stay", 0.0)
+        pd[b] = ((row.get("forward", 0.0) * p_next + row.get("charge_off", 0.0)) / leave
+                 if leave > 1e-12 else 0.0)
+    return pd
+
+
+def base_pd_for_stage(stage: int, cfg: EngineConfig, pd_life2: float,
+                      bucket: str | None = None,
+                      pd_roll: Dict[str, float] | None = None) -> float:
     if stage == 1:
         return cfg.pd_12m_stage1
     if stage == 2:
+        if (cfg.pd_lifetime_stage2_override is None and cfg.pd_stage2_method == "roll_matrix"
+                and pd_roll is not None and bucket in pd_roll):
+            return pd_roll[bucket]
         return pd_life2
     return 1.0  # Stage 3 defaulted  (H-S3PD)
 
@@ -124,6 +160,7 @@ class IFRS9Engine:
     def __init__(self, cfg: EngineConfig):
         self.cfg = cfg
         self.pd_life2 = lifetime_pd_stage2(cfg)
+        self.pd_roll = roll_matrix_pd(cfg)
         # probability-weighted scenario set
         self.scenarios = [
             ("base", cfg.scenario_prob_base, cfg.pd_multiplier_base, cfg.lgd_multiplier_base),
@@ -152,7 +189,7 @@ class IFRS9Engine:
         if ead <= 0:
             return 0.0, stage_for_bucket(bucket, self.cfg), 0.0, 0.0
         stage = stage_for_bucket(bucket, self.cfg)
-        pd_base = base_pd_for_stage(stage, self.cfg, self.pd_life2)
+        pd_base = base_pd_for_stage(stage, self.cfg, self.pd_life2, bucket, self.pd_roll)
         lgd_base = lgd_for_bucket(bucket, stage, self.cfg)
         df = self.discount_factor()
 

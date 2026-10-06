@@ -191,3 +191,83 @@ def test_acceleration_is_noop_when_loan_matures_before_charge_off():
     on = run_model(EngineConfig(acceleration_on_default=True, **kw)).portfolio["write_offs"].sum()
     off = run_model(EngineConfig(acceleration_on_default=False, **kw)).portfolio["write_offs"].sum()
     assert on == pytest.approx(off, rel=1e-12)
+
+
+# ---- code-review regressions ------------------------------------------------
+def _cohort_cfg(**kw):
+    T = kw.pop("horizon_months", 24)
+    base = dict(horizon_months=T, n_installments=12, cadence_mode="monthly",
+                origination_growth_mode="explicit_vector",
+                origination_vector=[1000] + [0] * (T - 1),
+                base_miss_rate=0.025, first_payment_default_rate=0.04)
+    base.update(kw)
+    return EngineConfig(**base)
+
+
+def test_late_fee_accrual_articulates_and_nets_to_cash_basis():
+    """Accrual books the assessed fee and writes off the uncollected share, so the
+    statements tie and net income equals the cash-basis run."""
+    cash = run_model(EngineConfig(horizon_months=18, late_fee_recognition="cash_basis"))
+    accr = run_model(EngineConfig(horizon_months=18, late_fee_recognition="accrual"))
+    assert_invariants(accr)
+    assert accr.income_statement["late_fee_income"].sum() > cash.income_statement["late_fee_income"].sum()
+    assert accr.income_statement["late_fee_uncollectible"].sum() > 0
+    assert np.allclose(accr.income_statement["net_income"], cash.income_statement["net_income"])
+
+
+def test_staging_is_instrument_level(monkeypatch):
+    """A loan with an installment in arrears is staged with its whole remaining
+    principal, so Stage-3 exposure exceeds the arrears-only cut; gross is unchanged."""
+    from bnpl_model.engine import Engine
+    inst = run_model(_cohort_cfg())
+    monkeypatch.setattr(Engine, "_exposure_buckets", lambda self, m, a, row: row.copy())
+    raw = run_model(_cohort_cfg())
+    assert_invariants(inst)
+    t = 7                                   # arrears have reached D90+ but loans still amortise
+    assert inst.portfolio.loc[t, "stage3_balance"] > 2 * raw.portfolio.loc[t, "stage3_balance"]
+    assert inst.portfolio.loc[t, "gross_receivable"] == pytest.approx(
+        raw.portfolio.loc[t, "gross_receivable"], rel=1e-12)
+
+
+def test_stage2_pd_solved_from_roll_matrix():
+    from bnpl_model.ifrs9 import roll_matrix_pd
+    cfg = EngineConfig()
+    pd_ = roll_matrix_pd(cfg)
+    rm = cfg.roll_matrix
+    # D90 forwards into D120 (at the 120 DPD edge -> charged off)
+    assert pd_["D90"] == pytest.approx(rm["D90"]["forward"] / (1 - rm["D90"]["stay"]))
+    assert pd_["D60"] == pytest.approx(rm["D60"]["forward"] * pd_["D90"] / (1 - rm["D60"]["stay"]))
+    assert 0 < pd_["D1"] < pd_["D8"] < pd_["D30"] < pd_["D60"] < 1
+    # worse roll rates -> more Stage-2 ECL, without touching the marginal curve
+    worse = {**rm, "D1": {"cure": 0.10, "stay": 0.15, "forward": 0.75, "charge_off": 0.0}}
+    cov = lambda c: run_model(c).portfolio["ecl_coverage"].iloc[-1]
+    assert cov(EngineConfig(horizon_months=18, roll_matrix=worse)) > cov(EngineConfig(horizon_months=18))
+
+
+def test_interest_accrues_on_performing_balance_only():
+    kw = dict(horizon_months=12, apr=0.24, cadence_mode="monthly", n_installments=6,
+              installment_weights=[1 / 6] * 6)
+    clean = run_model(EngineConfig(base_miss_rate=0.0, first_payment_default_rate=0.0, **kw))
+    gross_open = clean.portfolio["gross_receivable"].shift(1).fillna(0.0)
+    assert np.allclose(clean.income_statement["interest_income"], 0.24 / 12 * gross_open)
+    bad = run_model(EngineConfig(base_miss_rate=0.2, first_payment_default_rate=0.3, **kw))
+    gross_open = bad.portfolio["gross_receivable"].shift(1).fillna(0.0)
+    late = gross_open.index[gross_open > 0][2:]
+    assert (bad.income_statement.loc[late, "interest_income"] < 0.24 / 12 * gross_open[late]).all()
+
+
+def test_late_fee_cap_per_loan_is_applied():
+    late = lambda cap: run_model(_cohort_cfg(late_fee_cap_per_loan=cap, base_miss_rate=0.3)) \
+        .income_statement["late_fee_income"].sum()
+    uncapped, one_fee, none = late(1e9), late(7.0), late(0.0)
+    assert none == pytest.approx(0.0, abs=1e-9)
+    assert 0 < one_fee < uncapped
+
+
+def test_s3pd_invariant_catches_wrong_stage3_pd():
+    from bnpl_model.invariants import check_invariants
+    res = run_model(EngineConfig(horizon_months=18, base_miss_rate=0.05))
+    assert check_invariants(res).set_index("id").loc["H-S3PD", "passed"]
+    s3 = res.stage_detail["stage"] == 3
+    res.stage_detail.loc[s3, "ecl"] *= 0.6          # as if PD were 0.6
+    assert not check_invariants(res).set_index("id").loc["H-S3PD", "passed"]

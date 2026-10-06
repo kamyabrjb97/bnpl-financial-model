@@ -25,7 +25,7 @@ def _cov(**params):
 def test_schema_exposes_stage2_method_controls():
     d = client.get("/api/schema").json()
     defaults, groups = d["defaults"], d["groups"]
-    assert defaults["pd_lifetime_stage2_mode"] == "marginal_curve"
+    assert defaults["pd_lifetime_stage2_mode"] == "roll_matrix"
     assert isinstance(defaults["marginal_default_curve"], str)          # editable string
     # seeded fixed value is the derived PD, snapped to the slider step (0.005)
     derived = lifetime_pd_stage2(preset_default())
@@ -39,11 +39,11 @@ def test_schema_exposes_stage2_method_controls():
 
 
 def test_curve_mode_matches_engine_derivation():
-    """Curve mode (default curve) must reproduce the no-override engine behaviour."""
+    """Curve mode (default curve) must reproduce the engine's curve-derived behaviour."""
     curve_str = client.get("/api/schema").json()["defaults"]["marginal_default_curve"]
     cov_api = _cov(pd_lifetime_stage2_mode="marginal_curve", marginal_default_curve=curve_str)
-    # engine with override=None (curve-derived) is the default run
-    cov_engine = _cov()  # preset override is None -> derived
+    # engine with override=None and the curve method selected directly
+    cov_engine = _cov(pd_stage2_method="marginal_curve")
     assert cov_api == pytest.approx(cov_engine, rel=1e-9)
 
 
@@ -128,3 +128,18 @@ def test_run_articulates_in_both_modes():
         rep = client.post("/api/run", json={**params, "horizon_months": 18}).json()["invariants"]
         artic = [iv for iv in rep if iv["category"] == "articulation"]
         assert all(iv["passed"] for iv in artic)
+
+
+def test_zero_installments_is_a_400_not_a_500():
+    r = client.post("/api/run", json={"n_installments": 0})
+    assert r.status_code == 400
+
+
+@pytest.mark.skipif(not __import__("os").path.isdir(__import__("server.main").main.DIST),
+                    reason="SPA route only mounted when web/dist is built")
+@pytest.mark.parametrize("path", ["/C:/Windows/win.ini", "/..%2F..%2Fserver%2Fmain.py",
+                                  "/..%2F..%2FREADME.md"])
+def test_spa_route_does_not_serve_files_outside_dist(path):
+    r = client.get(path)
+    assert r.status_code == 200
+    assert r.text.lstrip().lower().startswith("<!doctype html")   # index.html fallback

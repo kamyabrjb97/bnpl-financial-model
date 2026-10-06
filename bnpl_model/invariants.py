@@ -112,15 +112,20 @@ def check_invariants(results) -> pd.DataFrame:
                for df in (isf, cf, bs, pf))
     add("H-NAN", "All statement cells finite", 0.0, allf)
 
-    # H-S3PD: Stage-3 ECL uses PD = 1.0 (ecl == lgd*ead within tolerance)
-    s3 = stage[stage["stage"] == 3]
+    # H-S3PD: Stage-3 ECL uses PD = 1.0 exactly: ecl == EAD * DF * (1+overlay) *
+    # sum_s prob_s * min(1, LGD * lgd_mult_s), and the reported base PD is 1.0
+    s3 = stage[(stage["stage"] == 3) & (stage["balance"] > 0)]   # empty rows report pd=0
     if len(s3):
-        implied = s3["lgd"] * s3["balance"]
+        from .ifrs9 import IFRS9Engine
+        eng = IFRS9Engine(cfg)
+        df_ = eng.discount_factor() * (1.0 + cfg.management_overlay_pct)
+        lgd_w = sum(prob * np.minimum(1.0, s3["lgd"] * lgd_mult)
+                    for _n, prob, _pdm, lgd_mult in eng.scenarios)
+        implied = s3["balance"] * lgd_w * df_
         r3 = (s3["ecl"] - implied).abs()
-        # overlays can scale this; check ecl <= lgd*ead*(1+overlay)+eps and pd column == 1
-        pd_ok = bool((s3["pd"].abs() >= 0).all())  # pd column stores base pd; stage3 ecl uses 1.0 internally
-        add("H-S3PD", "Stage-3 ECL ~ LGD*EAD (PD=1)", r3.max() if len(r3) else 0.0,
-            bool((r3 <= 0.5 * implied.clip(lower=1.0)).all()))
+        pd_ok = bool(((s3["pd"] - 1.0).abs() <= 1e-12).all())
+        add("H-S3PD", "Stage-3 ECL == LGD*EAD (PD=1)", r3.max(),
+            pd_ok and bool((r3 <= TOL * implied.abs().clip(lower=1.0)).all()))
 
     df = pd.DataFrame(checks)
     # Feasibility flags are business signals (e.g. undercapitalisation), NOT

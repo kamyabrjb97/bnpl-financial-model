@@ -21,6 +21,7 @@ export default function App() {
   const [tab, setTab] = useState(0);
   const [scenarios, setScenarios] = useState<SavedScenario[]>([]);
   const debounceRef = useRef<number | null>(null);
+  const runSeq = useRef(0);   // only the latest request may update state
 
   // load schema + defaults once
   useEffect(() => {
@@ -35,8 +36,11 @@ export default function App() {
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
     setLoading(true);
     debounceRef.current = window.setTimeout(() => {
+      const seq = ++runSeq.current;
+      const stale = () => seq !== runSeq.current;
       runModel(cfg)
         .then((r) => {
+          if (stale()) return;
           setResult(r);
           setError(null);
           // In curve mode the Stage-2 PD is derived from the curve; keep the hidden
@@ -49,8 +53,8 @@ export default function App() {
             }
           }
         })
-        .catch((e) => setError(String(e.message || e)))
-        .finally(() => setLoading(false));
+        .catch((e) => { if (!stale()) setError(String(e.message || e)); })
+        .finally(() => { if (!stale()) setLoading(false); });
     }, 220);
     return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
   }, [cfg]);

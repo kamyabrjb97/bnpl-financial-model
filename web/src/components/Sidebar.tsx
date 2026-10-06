@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Cfg, FieldDef, Group } from "../api";
 import { pct } from "../format";
 
@@ -10,6 +10,29 @@ const ICONS: Record<string, string> = {
 function visible(f: FieldDef, cfg: Cfg): boolean {
   if (!f.showIf) return true;
   return cfg[f.showIf.key] === f.showIf.equals;
+}
+
+// Keeps the typed text locally and only commits values that parse and sit inside
+// [min, max]; clearing the box to retype no longer sends 0 (e.g. 0 installments).
+function NumberField({ f, value, onChange }: { f: FieldDef; value: any; onChange: (k: string, v: any) => void }) {
+  const [draft, setDraft] = useState(String(value ?? ""));
+  useEffect(() => { setDraft(String(value ?? "")); }, [value]);   // external reset
+  const valid = (v: number) =>
+    Number.isFinite(v) && (f.min === undefined || v >= f.min) && (f.max === undefined || v <= f.max);
+  return (
+    <label className="field">
+      <span className="field-label">{f.label}</span>
+      <input
+        type="number" min={f.min} max={f.max} step={f.step} value={draft}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          const v = parseFloat(e.target.value);
+          if (e.target.value.trim() !== "" && valid(v) && v !== value) onChange(f.key, v);
+        }}
+        onBlur={() => setDraft(String(value ?? ""))}
+      />
+    </label>
+  );
 }
 
 function Field({ f, cfg, onChange }: { f: FieldDef; cfg: Cfg; onChange: (k: string, v: any) => void }) {
@@ -29,15 +52,7 @@ function Field({ f, cfg, onChange }: { f: FieldDef; cfg: Cfg; onChange: (k: stri
     );
   }
   if (f.type === "number") {
-    return (
-      <label className="field">
-        <span className="field-label">{f.label}</span>
-        <input
-          type="number" min={f.min} max={f.max} step={f.step} value={value}
-          onChange={(e) => onChange(f.key, e.target.value === "" ? 0 : parseFloat(e.target.value))}
-        />
-      </label>
-    );
+    return <NumberField f={f} value={value} onChange={onChange} />;
   }
   if (f.type === "select") {
     return (
